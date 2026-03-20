@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kerr Black Hole - Mantisse Protocol Simulation</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: white; }
+        canvas { display: block; }
+
+        #hud {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 300px;
+            background: rgba(0, 0, 0, 0.7);
+            border: 1px solid #444;
+            border-radius: 8px;
+            padding: 15px;
+            pointer-events: none;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+            backdrop-filter: blur(5px);
+        }
+
+        h2 { margin: 0 0 10px 0; font-size: 18px; color: #00ffff; text-transform: uppercase; letter-spacing: 2px; }
+        .stat { margin: 5px 0; font-size: 14px; display: flex; justify-content: space-between; }
+        .label { color: #aaa; }
+        .value { color: #fff; font-weight: bold; font-family: 'Courier New', Courier, monospace; }
+
+        #progress-container {
+            width: 100%;
+            height: 10px;
+            background: #222;
+            border-radius: 5px;
+            margin-top: 15px;
+            overflow: hidden;
+            border: 1px solid #333;
+        }
+
+        #progress-bar {
+            width: 0%;
+            height: 100%;
+            background: linear-gradient(90deg, #00ffff, #0066ff);
+            box-shadow: 0 0 10px #00ffff;
+            transition: width 0.1s linear;
+        }
+
+        #mantisse-alert {
+            position: absolute;
+            bottom: 40px;
+            width: 100%;
+            text-align: center;
+            font-size: 24px;
+            font-weight: bold;
+            color: #ff3333;
+            text-shadow: 0 0 10px #ff0000;
+            display: none;
+            pointer-events: none;
+            letter-spacing: 4px;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.5; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.05); }
+            100% { opacity: 0.5; transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="hud">
+        <h2>Mantisse Protocol</h2>
+        <div class="stat">
+            <span class="label">Comet Distance:</span>
+            <span class="value" id="distance">0.00 AU</span>
+        </div>
+        <div class="stat">
+            <span class="label">Energy Harvested:</span>
+            <span class="value" id="energy">0.00 MT</span>
+        </div>
+        <div class="stat">
+            <span class="label">Status:</span>
+            <span class="value" id="status" style="color: #66ff66;">IDLE</span>
+        </div>
+        <div id="progress-container">
+            <div id="progress-bar"></div>
+        </div>
+    </div>
+
+    <div id="mantisse-alert">MANSTISSE EXTRACTION ACTIVE</div>
+
+    <!-- Script imports: Standard Three.js to avoid ESM local file restrictions -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        // --- Configuration ---
+        const CONFIG = {
+            horizonRadius: 2,
+            ergosphereRadius: 4.5,
+            extractionZone: 4.0, // Radius < 4 AU triggers extraction
+            cometSpeed: 0.4,
+            spiralFactor: 0.05
+        };
+
+        // --- Setup ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(15, 10, 15);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        document.body.appendChild(renderer.domElement);
+
+        // Simple light for general visibility
+        const ambientLight = new THREE.AmbientLight(0x404040);
+        scene.add(ambientLight);
+
+        // --- Shaders ---
+        const ergosphereVertex = `
+            varying vec3 vPosition;
+            void main() {
+                vPosition = position;
+                vec3 pos = position;
+                pos.y *= 0.7; // Kerr Flattening
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+            }
+        `;
+
+        const ergosphereFragment = `
+            uniform float uTime;
+            varying vec3 vPosition;
+            void main() {
+                float pulse = 0.5 + 0.5 * sin(uTime * 2.0);
+                float dist = length(vPosition);
+                vec3 color = vec3(0.0, 0.5, 1.0) + vec3(0.1, 0.2, 0.4) * pulse;
+                float edge = 1.0 - smoothstep(4.0, 4.5, dist);
+                gl_FragColor = vec4(color, 0.2 * edge + 0.1 * pulse);
+            }
+        `;
+
+        // --- Core Objects ---
+
+        // 1. Black Hole
+        const bhGeometry = new THREE.SphereGeometry(CONFIG.horizonRadius, 64, 64);
+        const bhMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
+        const blackHole = new THREE.Mesh(bhGeometry, bhMaterial);
+        scene.add(blackHole);
+
+        // 2. Ergosphere
+        const ergoGeometry = new THREE.SphereGeometry(CONFIG.ergosphereRadius, 64, 64);
+        const ergoMaterial = new THREE.ShaderMaterial({
+            vertexShader: ergosphereVertex,
+            fragmentShader: ergosphereFragment,
+            uniforms: { uTime: { value: 0 } },
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide
+        });
+        const ergosphere = new THREE.Mesh(ergoGeometry, ergoMaterial);
+        scene.add(ergosphere);
+
+        // 3. Accretion Disk (Particles)
+        const diskCount = 4000;
+        const diskGeometry = new THREE.BufferGeometry();
+        const diskPos = new Float32Array(diskCount * 3);
+        const diskColors = new Float32Array(diskCount * 3);
+        for (let i = 0; i < diskCount; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const r = 6 + Math.random() * 7;
+            diskPos[i * 3] = Math.cos(angle) * r;
+            diskPos[i * 3 + 1] = (Math.random() - 0.5) * 0.4;
+            diskPos[i * 3 + 2] = Math.sin(angle) * r;
+            diskColors[i * 3] = 0.8 + Math.random() * 0.2;
+            diskColors[i * 3 + 1] = 0.4 + Math.random() * 0.3;
+            diskColors[i * 3 + 2] = 1.0;
+        }
+        diskGeometry.setAttribute('position', new THREE.BufferAttribute(diskPos, 3));
+        diskGeometry.setAttribute('color', new THREE.BufferAttribute(diskColors, 3));
+        const diskMaterial = new THREE.PointsMaterial({ size: 0.05, vertexColors: true, transparent: true, opacity: 0.6 });
+        const accretionDisk = new THREE.Points(diskGeometry, diskMaterial);
+        scene.add(accretionDisk);
+
+        // 4. Comet
+        const cometGroup = new THREE.Group();
+        const cometGeo = new THREE.SphereGeometry(0.2, 16, 16);
+        const cometMat = new THREE.MeshBasicMaterial({ color: 0xccff00 });
+        const cometBody = new THREE.Mesh(cometGeo, cometMat);
+        cometGroup.add(cometBody);
+
+        const glowGeo = new THREE.SphereGeometry(0.5, 16, 16);
+        const glowMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.3 });
+        const glow = new THREE.Mesh(glowGeo, glowMat);
+        cometGroup.add(glow);
+        scene.add(cometGroup);
+
+        // Trail
+        const trailLimit = 150;
+        const trailPositions = new Float32Array(trailLimit * 3);
+        const trailGeometry = new THREE.BufferGeometry();
+        trailGeometry.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+        const trailMaterial = new THREE.LineBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.5 });
+        const trail = new THREE.Line(trailGeometry, trailMaterial);
+        scene.add(trail);
+        const trailPoints = [];
+
+        // 5. Jets (Penrose Extraction)
+        const jetCount = 300;
+        const jetGeo = new THREE.BufferGeometry();
+        const jetPos = new Float32Array(jetCount * 3);
+        const jetVels = new Float32Array(jetCount * 3);
+        jetGeo.setAttribute('position', new THREE.BufferAttribute(jetPos, 3));
+        const jetMat = new THREE.PointsMaterial({ color: 0xff3300, size: 0.12, transparent: true, opacity: 0 });
+        const jets = new THREE.Points(jetGeo, jetMat);
+        scene.add(jets);
+
+        function resetJet(i) {
+            jetPos[i * 3] = (Math.random() - 0.5) * 0.5;
+            jetPos[i * 3 + 1] = 0;
+            jetPos[i * 3 + 2] = (Math.random() - 0.5) * 0.5;
+            jetVels[i * 3 + 1] = (Math.random() > 0.5 ? 1 : -1) * (0.15 + Math.random() * 0.2);
+            jetVels[i * 3] = (Math.random() - 0.5) * 0.02;
+            jetVels[i * 3 + 2] = (Math.random() - 0.5) * 0.02;
+        }
+        for (let i = 0; i < jetCount; i++) resetJet(i);
+
+        // --- HUD Logic ---
+        const ui = {
+            distance: document.getElementById('distance'),
+            energy: document.getElementById('energy'),
+            status: document.getElementById('status'),
+            progress: document.getElementById('progress-bar'),
+            alert: document.getElementById('mantisse-alert')
+        };
+        let harvestedEnergy = 0;
+
+        // --- Animation ---
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = clock.getElapsedTime();
+            const delta = clock.getDelta();
+
+            accretionDisk.rotation.y += 0.003;
+            ergoMaterial.uniforms.uTime.value = time;
+
+            // Spiral Trajectory with Mantisse Stabilization
+            const theta = time * CONFIG.cometSpeed * 2.0;
+            const targetMinRadius = 2.4; // Mantisse Limit (1.2 * Horizon)
+            
+            let r_base = 18 * Math.exp(-CONFIG.spiralFactor * theta);
+            let r;
+            let isStabilized = false;
+
+            if (r_base <= targetMinRadius) {
+                // Stabilization Phase: Oscillate at the target radius
+                isStabilized = true;
+                r = targetMinRadius + 0.15 * Math.sin(time * 6.0);
+            } else {
+                r = r_base;
+            }
+
+            cometGroup.position.x = Math.cos(theta) * r;
+            cometGroup.position.z = Math.sin(theta) * r;
+            cometGroup.position.y = isStabilized 
+                ? Math.sin(time * 3.0) * 0.5 // Stable oscillation
+                : Math.sin(theta * 0.4) * 1.5;
+
+            // Update Trail
+            trailPoints.unshift(new THREE.Vector3().copy(cometGroup.position));
+            if (trailPoints.length > trailLimit) trailPoints.pop();
+            for (let i = 0; i < trailPoints.length; i++) {
+                trailPositions[i * 3] = trailPoints[i].x;
+                trailPositions[i * 3 + 1] = trailPoints[i].y;
+                trailPositions[i * 3 + 2] = trailPoints[i].z;
+            }
+            trail.geometry.attributes.position.needsUpdate = true;
+            
+            // Visual shift in trail during stabilization
+            if (isStabilized) {
+                trail.material.color.setHex(0xff3300);
+                trail.material.opacity = 0.8;
+            } else {
+                trail.material.color.setHex(0x00ffcc);
+                trail.material.opacity = 0.5;
+            }
+
+            // Distance & Extraction
+            const d = r; // Distance is r
+            ui.distance.innerText = d.toFixed(2) + " AU";
+
+            if (d < CONFIG.extractionZone) {
+                ui.status.innerText = isStabilized ? "STABILIZED EXTRACTION" : "EXTRACTION ACTIVE";
+                ui.status.style.color = "#ff3333";
+                ui.alert.style.display = "block";
+                harvestedEnergy += 0.8;
+                ui.energy.innerText = harvestedEnergy.toFixed(2) + " MT";
+                ui.progress.style.width = Math.min(harvestedEnergy / 10, 100) + "%";
+                
+                jetMat.opacity = Math.min(jetMat.opacity + 0.05, 0.8);
+                glow.scale.setScalar(1.2 + Math.sin(time * 15) * 0.3);
+                glow.material.color.setHex(0xff0033);
+
+                for (let i = 0; i < jetCount; i++) {
+                    jetPos[i * 3] += jetVels[i * 3];
+                    jetPos[i * 3 + 1] += jetVels[i * 3 + 1];
+                    jetPos[i * 3 + 2] += jetVels[i * 3 + 2];
+                    if (Math.abs(jetPos[i * 3 + 1]) > 12) resetJet(i);
+                }
+                jets.geometry.attributes.position.needsUpdate = true;
+            } else {
+                ui.status.innerText = "APPROACHING";
+                ui.status.style.color = "#66ff66";
+                ui.alert.style.display = "none";
+                jetMat.opacity = Math.max(jetMat.opacity - 0.02, 0);
+                glow.scale.setScalar(1.0);
+                glow.material.color.setHex(0x00ffcc);
+            }
+
+            // Camera follow / Orbit
+            camera.lookAt(0, 0, 0);
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
